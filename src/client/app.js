@@ -58,6 +58,7 @@ var moving;
 const offset = new THREE.Vector3();
 const images = window.images = [];
 const clock = new THREE.Clock();
+var firstFrame = true; 
 function animate() {
   controls.update(clock.getDelta());
   if (moving) {
@@ -76,6 +77,15 @@ function animate() {
     box.position.z -= 0.5;
   }
   */
+
+  if (firstFrame) {
+    const [vrcam] = renderCamera.cameras;
+    vrcam.matrix.decompose(vrcam.position, vrcam.quaternion, vrcam.scale);
+    cursor.position.copy(vrcam.position);
+    cursor.quaternion.copy(vrcam.quaternion);
+    cursor.translateZ(-0.5);
+    firstFrame = false;
+  }
 
   renderer.render(scene, renderCamera);
 }
@@ -108,62 +118,46 @@ const room = client.join('leapshot');
 
 const loader = new THREE.TextureLoader();
 
-room.listen('images/:*', change => {
-  const img = new THREE.Mesh(
-    new THREE.PlaneBufferGeometry(0.1, 0.1),
-    new THREE.MeshBasicMaterial({
-      map: loader.load('/' + change.value, texture => {
-        texture.anisotropy = renderer.getMaxAnisotropy();
-        texture.minFilter = THREE.NearestFilter;
-        texture.magFilter = THREE.NearestMipMapNearestFilter;
-        texture.anisotropy = renderer.getMaxAnisotropy();
-        img.scale.x = texture.image.naturalWidth / texture.image.naturalHeight;
-        img.scale.multiplyScalar(texture.image.naturalHeight / 400);
-      }),
-      side: THREE.DoubleSide,
-    }),
-  );
-  img.frustumCulled = false;
-  img.position.copy(cursor.position);
-  img.position.z -= 0.05;
-  images.push(img);
-  appScene.add(img);
-});
-
-let intersected;
-room.listen('pos/:coord', change => {
-  cursor.position[change.path.coord] = change.value;
-  raycaster.ray.origin[change.path.coord] = change.value;
-  for (const image of images) {
-    image.material.color.setHex(0xFFFFFF);
-  }
-  intersects.length = 0;
-  raycaster.intersectObjects(images, false, intersects);
-  if (intersects.length) {
-    intersected = intersects[0].object;
-    intersected.material.color.setHex(0xFFAAAA);
-  } else {
-    intersected = null;
-  }
-});
-
-room.listen('buttons/:value', change => {
-  if (cursor.children[0]) {
-    cursor.children[0].material.color.setHex(change.value === 0 ? 0xFFFFFF : 0xFFAAAA);
-  }
-  if (change.value) {
-    if (intersected) {
-      offset.subVectors(intersected.position, cursor.position);
-      moving = intersected;
-    }
-  } else {
-    moving = null;
-  }
-});
-
-let keys = [];
-let scaleTarget;
+var intersected;
+var buttons = 0;
+const keys = [];
+var scaleTarget;
 room.onMessage.add((message) => {
+  if (message.buttons !== undefined) {
+    buttons = message.buttons;
+    if (cursor.children[0]) {
+      cursor.children[0].material.color.setHex(buttons === 0 ? 0xFFFFFF : 0xFFAAAA);
+    }
+    if (buttons) {
+      if (intersected) {
+        offset.subVectors(intersected.position, cursor.position);
+        moving = intersected;
+      }
+    } else {
+      moving = null;
+    }
+  }
+  if (message.image) {
+    const img = new THREE.Mesh(
+      new THREE.PlaneBufferGeometry(0.1, 0.1),
+      new THREE.MeshBasicMaterial({
+        map: loader.load('/' + message.image, texture => {
+          texture.anisotropy = renderer.getMaxAnisotropy();
+          texture.minFilter = THREE.NearestFilter;
+          texture.magFilter = THREE.NearestMipMapNearestFilter;
+          texture.anisotropy = renderer.getMaxAnisotropy();
+          img.scale.x = texture.image.naturalWidth / texture.image.naturalHeight;
+          img.scale.multiplyScalar(texture.image.naturalHeight / 400);
+        }),
+        side: THREE.DoubleSide,
+      }),
+    );
+    img.frustumCulled = false;
+    img.position.copy(cursor.position);
+    img.position.z -= 0.05;
+    images.push(img);
+    appScene.add(img);
+  }
   if (message.keydown) {
     keys.push(message.keydown);
     if(message.keydown === 'Shift') {
@@ -175,8 +169,65 @@ room.onMessage.add((message) => {
     if(message.keyup === 'Shift') {
       scaleTarget = null;
     }
+    if(message.keyup === 'a' && intersected) {
+      const [vrcam] = renderer.vr.getCamera(camera).cameras;
+      vrcam.matrix.decompose(vrcam.position, vrcam.quaternion, vrcam.scale);
+      intersected.lookAt(vrcam.position);
+    }
+    if(message.keyup === 'x' && intersected) {
+      appScene.remove(intersected);
+      images.splice(images.indexOf(intersected), 1);
+      intersected = null;
+    }
+    if(message.keyup === 'r') {
+      const [vrcam] = renderer.vr.getCamera(camera).cameras;
+      vrcam.matrix.decompose(vrcam.position, vrcam.quaternion, vrcam.scale);
+      cursor.position.copy(vrcam.position);
+      cursor.quaternion.copy(vrcam.quaternion);
+      cursor.translateZ(-0.5);
+    }
+    if(message.keyup === 'd' && intersected) {
+      const dupe = intersected.clone();
+      dupe.material = new THREE.MeshBasicMaterial({map: intersected.material.map, side: THREE.DoubleSide});
+      dupe.translateY(0.1);
+      dupe.translateZ(0.01);
+      appScene.add(dupe);
+      images.push(dupe);
+    }
   }
-  if (scaleTarget && message.wheel) {
-    scaleTarget.scale.multiplyScalar(1 - message.wheel * 0.5);
+  if (message.wheel) {
+    if (keys.includes('Shift')) {
+      if(scaleTarget) {
+        scaleTarget.scale.multiplyScalar(1 - message.wheel * 0.5);
+      }
+    } else {
+      cursor.translateZ(message.wheel * 0.05);
+    }
+  }
+  if (message.mousemove) {
+    const {x, y} = message.mousemove;
+    cursor.translateX(x / 2000);
+    if (buttons & 4) {
+      cursor.translateZ(y / 1000);
+    } else {
+      cursor.translateY(-y / 2000);
+    }
+    const [vrcam] = renderer.vr.getCamera(camera).cameras;
+    vrcam.matrix.decompose(vrcam.position, vrcam.quaternion, vrcam.scale);
+    cursor.lookAt(vrcam.position);
+    raycaster.ray.origin.copy(cursor.position);
+    raycaster.ray.direction.set(0, 0, -1);
+    raycaster.ray.direction.applyQuaternion(cursor.quaternion);
+    for (const image of images) {
+      image.material.color.setHex(0xFFFFFF);
+    }
+    intersects.length = 0;
+    raycaster.intersectObjects(images, false, intersects);
+    if (intersects.length) {
+      intersected = intersects[0].object;
+      intersected.material.color.setHex(0xFFAAAA);
+    } else {
+      intersected = null;
+    }
   }
 });
